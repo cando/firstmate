@@ -247,6 +247,30 @@ Unlike tmux process-name inspection, native registration can classify Pi without
 The session-start sweep uses this probe.
 Mid-session secondmate liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
+## Primary pane agent-session binding guard
+
+Herdr's own pi integration (`HERDR_INTEGRATION_ID=pi`, installed and managed by herdr, version 6 as of herdr 0.7.5) is the only source of a pi pane's `agent_session` binding and live working/idle state.
+It captures the pi session file at `session_start` and `agent_start` and reports it only then; when the capture or report is missed, herdr 0.7.5 clears the pane's binding on the first state report without a session ref and never restores it.
+The pane shows `agent=pi` with no `agent_session` and no spinner while the agent works.
+A pi restart fixes it because a fresh integration instance re-reports the session.
+
+Firstmate ships an in-pane guard extension (`.pi/extensions/fm-herdr-session-guard.ts`) that keeps the binding anchored.
+It checks its own pane over the herdr socket at session and turn boundaries plus a short timer, and when it sees a pi agent with no `agent_session` it re-reports the binding exactly like herdr's integration would (source `herdr:pi`, agent `pi`, the current pi session file with the current state).
+The repair is idempotent on a healthy pane and never fights the integration's own reports.
+When a repair cannot succeed it surfaces one bounded escalation through the firstmate operational channel naming the exact reason and the restart instruction.
+
+Verification procedure (run from a shell inside the primary herdr pane):
+
+```sh
+# Confirm the pane has an agent with a session binding (healthy):
+herdr agent get "$HERDR_PANE_ID" --session "$HERDR_SESSION"
+# Output shows agent=pi and agent_session={kind:"path", source:"herdr:pi", value:"<session-file>"}.
+
+# When broken, agent_session is absent (null) and agent_status is idle or unknown
+# while pi is actually working. The guard re-attaches the binding within one turn.
+# If the guard escalates, the primary pane shows an operational wake message.
+```
+
 ## Push events and polling fallback
 
 Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-socket reader.
@@ -316,6 +340,7 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-herdr-session-guard.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

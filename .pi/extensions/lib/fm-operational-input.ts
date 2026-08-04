@@ -10,6 +10,7 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
   "session-start",
   "watcher",
   "turn-end-guard",
+  "herdr-guard",
   "away-supervisor",
   "from-firstmate",
   "launch-brief",
