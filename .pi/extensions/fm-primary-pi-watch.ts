@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -239,6 +239,17 @@ export default function (pi: ExtensionAPI) {
 
   async function sendWake(owner: SessionGeneration, message: string): Promise<void> {
     if (!generationIsLive(owner)) return;
+    // Away mode: while state/.afk exists the afk daemon owns wake triage and
+    // injects batched escalations itself, so skip direct delivery - routine
+    // wakes must never consume a firstmate turn while the captain is away.
+    try {
+      if (existsSync(resolve(fmRoot, "state", ".afk"))) {
+        console.error(`[fm-primary-pi-watch] away mode active; skipping wake delivery: ${message.slice(0, 80)}`);
+        return;
+      }
+    } catch {
+      // a missing or unreadable marker is treated as not-away
+    }
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
