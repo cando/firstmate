@@ -434,6 +434,48 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Agent-session binding loss and repair
+
+The binding-loss mechanism and the guard repair were verified on 2026-08-04 with Herdr 0.7.5 protocol 17 on Linux x86_64.
+In an isolated lab provisioned with `bin/fm-herdr-lab.sh`, a plain-shell pane was given a pi agent binding, then exposed to the clearing path, then repaired:
+
+```sh
+S=$(bin/fm-herdr-lab.sh name guard-verify)
+bin/fm-herdr-lab.sh provision "$S"
+bin/fm-herdr-lab.sh run "$S" workspace create --cwd /tmp
+# Show no agent in the fresh pane:
+bin/fm-herdr-lab.sh run "$S" agent get w1:p1
+# Report agent pi with a session path (the anchor):
+bin/fm-herdr-lab.sh run "$S" pane report-agent w1:p1 \
+  --source herdr:pi --agent pi --state idle --seq 1786000000001 \
+  --agent-session-path /tmp/fake-session.jsonl
+# Verify agent_session is present:
+bin/fm-herdr-lab.sh run "$S" agent get w1:p1
+# A state report without the session ref clears the binding:
+bin/fm-herdr-lab.sh run "$S" pane report-agent w1:p1 \
+  --source herdr:pi --agent pi --state working --seq 1786000000002
+bin/fm-herdr-lab.sh run "$S" agent get w1:p1
+# agent_session is now null; state was accepted.
+# Repair with a session path re-anchors:
+bin/fm-herdr-lab.sh run "$S" pane report-agent w1:p1 \
+  --source herdr:pi --agent pi --state idle --seq 1786000000010 \
+  --agent-session-path /tmp/fake-session.jsonl
+bin/fm-herdr-lab.sh run "$S" agent get w1:p1
+# agent_session is restored.
+bin/fm-herdr-lab.sh teardown "$S"
+```
+
+Observed output (collapsed):
+
+```text
+agent: null, agent_session: null
+agent: pi, agent_status: idle, agent_session: {source:"herdr:pi", kind:"path", value:"/tmp/fake-session.jsonl"}
+agent: pi, agent_status: working, agent_session: null
+agent: pi, agent_status: idle, agent_session: {source:"herdr:pi", kind:"path", value:"/tmp/fake-session.jsonl"}
+```
+
+The guard extension is verified independently through `tests/fm-herdr-session-guard.test.sh` with a fake herdr socket server.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

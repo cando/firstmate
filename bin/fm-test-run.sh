@@ -138,6 +138,7 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-herdr-session-guard.test.sh|\
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -568,6 +569,11 @@ run_coverage_guard() {
   local tmp missing extra a b shard
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
+  # comm must collate exactly like the LC_ALL=C sort that builds every lane
+  # file here, or it rejects the input as unsorted under a UTF-8 ambient
+  # locale (verified: en_US.UTF-8 comm against C-sorted ASCII paths fails on
+  # dot-vs-dash ordering such as fm-backend.test.sh vs fm-backend-herdr-...).
+  export LC_ALL=C
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
   list_proven_isolated | LC_ALL=C sort -u >"$tmp/proven"
