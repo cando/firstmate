@@ -395,6 +395,56 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
+# --- a turn-end with a progress-verb status log is absorbed even when the ----
+# --- pane is momentarily quiet between turns --------------------------------
+# The status log's own working:/resolved: line is positive mid-task evidence, so
+# a benign mid-task turn-end is absorbed even when fm-crew-state.sh cannot prove
+# a busy pane or run-step at this instant (the between-turns quiet gap). Without
+# this, two workers doing many turns surface a wake for every turn-end.
+test_turn_ended_progress_status_absorbed_when_pane_quiet() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case turn-ended-progress-quiet); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: implementing the change\n' > "$status_file"
+  : > "$state/task.turn-ended"
+  # The pane is NOT busy and there is no run-step right now (between turns): the
+  # strict current-state read reports unknown, but the progress verb in the
+  # status log makes the turn-end benign.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a progress-status turn-end (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "progress-status turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "progress-status turn-end enqueued a durable wake record"
+  [ -s "$state/.seen-task_status" ] || fail "progress-status turn-end did not advance its .seen-* suppressor"
+  reap "$pid"
+  pass "a turn-end with a working: status log is absorbed even when the pane is quiet"
+}
+
+# --- a turn-end whose status log carries a terminal done: line surfaces -------
+# A done: status is captain-relevant, so its final turn-end must surface even
+# when the .status file itself was already seen in an earlier wake (only the
+# .turn-ended marker is new in this batch).
+test_turn_ended_done_status_surfaced() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case turn-ended-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'done: PR https://example.test/pr/3\n' > "$state/task.status"
+  # The done: status was already surfaced in an earlier wake; only the final
+  # turn-end marker is new now.
+  sig=$(seen_sig "$state/task.status"); printf '%s' "$sig" > "$state/.seen-task_status"
+  : > "$state/task.turn-ended"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end with a terminal done: status"
+  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the turn-end signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the done turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "done turn-end was not queued"
+  pass "a turn-end with a terminal done: status surfaces (queue + exit)"
+}
+
 test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -437,6 +487,32 @@ test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-blocked"
+  printf 'finished, awaiting review' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/blocked.meta"
+  printf 'blocked: no perms\n' > "$state/blocked.status"
+  sig=$(seen_sig "$state/blocked.status"); printf '%s' "$sig" > "$state/.seen-blocked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting review")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a stale pane on a terminal status"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
+  pass "a stale pane sitting on a non-done terminal status is surfaced (queue + exit)"
+}
+
+# --- stale pane, done status: skipped entirely (no queue, no exit) ---
+# After teardown, leftover stale pings for a task whose status shows done:
+# should be silently skipped rather than surfaced or queued.
+test_done_stale_skipped() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case done-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-done"
   printf 'finished, awaiting review' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/done.meta"
@@ -449,11 +525,13 @@ test_terminal_stale_surfaced() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not exit for a stale pane on a terminal status"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
-  pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
+  wait_live "$pid" 30 || fail "watcher exited for a done stale pane (should skip)"
+  [ ! -s "$out" ] || fail "watcher printed a wake reason for a done stale pane"
+  [ ! -s "$state/.wake-queue" ] || fail "watcher enqueued a wake for a done stale pane"
+  reap "$pid"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after done skip failed"
+  grep -F "stale" "$drain_out" | grep -F "$window" >/dev/null && fail "done stale pane was queued" || true
+  pass "a stale pane sitting on done: is silently skipped (no queue, no exit)"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -473,10 +551,11 @@ test_stale_terminal_status_overridden_by_active_run() {
   window="test:fm-validating"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
-  # this line never gets superseded by a newer status-log entry while the
-  # pipeline itself runs.
-  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  # The crew reported needs-decision BEFORE firstmate triggered no-mistakes
+  # validation; this line never gets superseded by a newer status-log entry
+  # while the pipeline itself runs. Use a non-done terminal status so the
+  # active-run override path is still exercised; done: is now skipped earlier.
+  printf 'needs-decision: implementation complete, ready to validate\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
@@ -1810,9 +1889,12 @@ test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_progress_status_absorbed_when_pane_quiet
+test_turn_ended_done_status_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_done_stale_skipped
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
