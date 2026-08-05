@@ -88,8 +88,9 @@ test_stale_enqueue_before_suppressor() {
   # A stale pane sitting on a captain-relevant status is actionable when the crew
   # is not provably working, so give the window one and prime the .seen-* marker
   # to its current signature so the per-poll signal scan does not pre-empt the
-  # stale wake with a signal wake.
-  printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
+  # stale wake with a signal wake. Use a non-done terminal verb: done: tasks are
+  # now skipped entirely by the stale path (post-teardown leftover pings).
+  printf 'blocked: ready in branch fm/stale\n' > "$state/stale.status"
   if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
   printf '%s' "$sig" > "$state/.seen-stale_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')

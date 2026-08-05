@@ -363,13 +363,48 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 (benign/absorb) if a .turn-ended signal for <task> is a benign mid-task turn:
+# the crew's status log has no terminal line (done/failed/blocked/needs-decision)
+# and no declared pause, and either the log itself shows a progress verb
+# (working/resolved) or the authoritative current-state read reports the crew
+# provably working. A turn-end is a wake NOTIFICATION only: the .turn-ended
+# marker's mtime still resets the busy-turn wedge timer regardless of this verdict,
+# so absorbing the wake never disarms the wedge detector.
+turn_end_absorbable() {  # <task> <state>
+  local task=$1 state=$2 last
+  last=$(last_status_line "$state/$task.status")
+  [ -n "$last" ] || { crew_is_provably_working "$task"; return; }
+  status_is_paused "$last" && return 1
+  case "$(status_line_verb "$last")" in
+    done|needs-decision|blocked|failed) return 1 ;;
+    working|resolved) return 0 ;;
+  esac
+  crew_is_provably_working "$task"
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to
 # task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
+# A task with a .turn-ended file in the batch is judged by turn_end_absorbable (the
+# log's progress verb is positive mid-task evidence on its own), while a task with
+# only .status files keeps the strict current-state read, so a benign mid-task
+# turn-end is never surfaced just because the pane is momentarily quiet between
+# turns. The .turn-ended tasks are collected first so their verdict wins when the
+# same task also has a .status file in the batch.
 signal_crew_provably_working() {  # <file> ...
-  local f base task seen=""
+  local f base task seen="" turn_end_tasks=""
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.turn-ended)
+        task=${base%.turn-ended}
+        [ -n "$task" ] || continue
+        case " $turn_end_tasks " in *" $task "*) ;; *) turn_end_tasks="$turn_end_tasks $task" ;; esac
+        ;;
+    esac
+  done
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
@@ -380,7 +415,10 @@ signal_crew_provably_working() {  # <file> ...
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    case " $turn_end_tasks " in
+      *" $task "*) turn_end_absorbable "$task" "${STATE:-${FM_STATE_OVERRIDE:-}}" || return 1 ;;
+      *)            crew_is_provably_working "$task" || return 1 ;;
+    esac
   done
   [ -n "$seen" ] || return 1
   return 0

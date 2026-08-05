@@ -13,7 +13,11 @@
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working, unless afk is active. A
+#                          .turn-ended signal whose status log carries a progress
+#                          verb (working:/resolved:) is absorbed even when the
+#                          pane is momentarily quiet between turns, so mid-task
+#                          turn boundaries never wake firstmate.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -887,6 +891,10 @@ EOF
     #     pipeline and no busy pane, so it may be done (even via an interactive menu
     #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
     #     such a turn-end is exactly the swallowed-finish this change guards against.
+    #   A .turn-ended file is judged by turn_end_absorbable: a progress-verb status
+    #   log (working:/resolved:) is positive mid-task evidence, so that turn-end is
+    #   benign even when the pane is quiet between turns, while a terminal or paused
+    #   status log still surfaces it.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew IS provably working) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
@@ -934,6 +942,13 @@ EOF
       clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+      continue
+    fi
+    # Skip stale detection for tasks that are already done or torn down.
+    # After teardown, leftover stale pings for a pane that no longer exists
+    # require a no-op drain; a task whose status shows done: is similarly
+    # no longer monitored and does not need wedge detection.
+    if [ ! -e "$STATE/$task.meta" ] || { [ -n "$last" ] && [ "$(status_line_verb "$last")" = "done" ]; }; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
