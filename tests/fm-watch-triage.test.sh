@@ -575,25 +575,129 @@ test_blocked_reason_change_resurfaces() {
   pass "a changed blocked: line re-surfaces and advances the surfaced marker"
 }
 
-# --- done:/failed: terminal completions always surface ----------------------
-# The dedupe must never suppress terminal completions, even when the exact line
-# was already surfaced once (e.g. a later turn-end after the done: wake).
-test_failed_turn_end_always_surfaces() {
-  local dir state fakebin out drain_out status_file pid
-  dir=$(make_case failed-turn-end-always-surfaces); state="$dir/state"; fakebin="$dir/fakebin"
+# --- done:/failed: already-surfaced terminal turn-ends dedupe -------------
+# A terminal line surfaces once (the .hb-surfaced-<task> marker records it), then
+# a repeat turn-end of the SAME line is absorbed while the crew is provably
+# working (a done/failed worker steered to keep working keeps completing turns)
+# and surfaces again when it is not (a quiet done/failed worker may be wedged,
+# so the wedge detector must keep surfacing it).
+test_failed_turn_end_surfaces_once_then_dedupes() {
+  local dir state fakebin out drain_out status_file sig newsig i pid
+  dir=$(make_case failed-turn-end-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/task.status"
   printf 'failed: validation run failed\n' > "$status_file"
   sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
   printf 'failed: validation run failed\n' > "$state/.hb-surfaced-task"
+
+  # Phase A: already-surfaced failed line, repeat turn-end, crew NOT provably
+  # working (the wedge case: a quiet failed worker may be stuck) -> surfaces.
   : > "$state/task.turn-ended"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end with a terminal failed: status"
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a repeat failed: turn-end for a crew that is not provably working"
   grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the failed turn-end signal reason"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the failed turn-end failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "failed turn-end was not queued"
-  pass "a turn-end with a terminal failed: status always surfaces (queue + exit)"
+
+  # Phase B: same line, fresh turn-end, crew provably working -> absorbed.
+  : > "$state/task.turn-ended"
+  newsig=$(seen_sig "$state/task.turn-ended")
+  : > "$out"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" != "$newsig" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "a repeat failed: turn-end surfaced again while the crew is provably working: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "repeat failed turn-end while provably working printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "repeat failed turn-end while provably working enqueued a durable wake record"
+  [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" = "$newsig" ] \
+    || fail "absorbed failed turn-end did not advance its .seen-* suppressor"
+  [ -e "$state/task.turn-ended" ] || fail "absorbing a failed turn-end removed the turn-end marker"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "failed: validation run failed" ] \
+    || fail "absorbed failed turn-end changed the surfaced marker"
+  reap "$pid"
+  pass "a failed: turn-end surfaces when not provably working and is absorbed while provably working"
+}
+
+# --- done: turn-ends: surfaces once, then repeat turn-ends dedupe -----------
+# A worker that reported done: but was steered to keep working (e.g. a rebase)
+# keeps completing turns with the SAME done: line as its last status. The first
+# turn-end surfaces (marker written); repeat turn-ends are absorbed while the
+# crew is provably working, surface again once the crew stops being provably
+# working (the wedge case), and a NEW done: line re-surfaces and advances the
+# marker.
+test_done_turn_end_surfaces_once_then_absorbed_while_working() {
+  local dir state fakebin out drain_out status_file sig newsig i pid
+  dir=$(make_case done-turn-end-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/task.status"
+  printf 'done: PR https://example.test/pr/3\n' > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
+  printf 'done: PR https://example.test/pr/3\n' > "$state/.hb-surfaced-task"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+
+  # Phase A: the done: line was already surfaced and the crew is provably
+  # working (mid-rebase), so a repeat turn-end is absorbed: watcher stays alive,
+  # nothing printed, nothing queued, the .turn-ended marker (the busy-turn wedge
+  # age source) survives, and the surfaced marker is unchanged.
+  newsig=$(seen_sig "$state/task.turn-ended")
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" != "$newsig" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "a repeat done: turn-end surfaced while the crew is provably working: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "repeat done turn-end while provably working printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "repeat done turn-end while provably working enqueued a durable wake record"
+  [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" = "$newsig" ] \
+    || fail "absorbed done turn-end did not advance its .seen-* suppressor"
+  [ -e "$state/task.turn-ended" ] || fail "absorbing a done turn-end removed the turn-end marker"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "done: PR https://example.test/pr/3" ] \
+    || fail "absorbed done turn-end changed the surfaced marker"
+  reap "$pid"
+
+  # Phase B: the worker goes quiet (not provably working) with the SAME done:
+  # line - the wedge case - so the turn-end surfaces again.
+  : > "$state/task.turn-ended"
+  : > "$out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a repeat done: turn-end for a crew that is not provably working"
+  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the done turn-end signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the done turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "done turn-end was not queued"
+
+  # Phase C: a NEW done: line is appended (status change) - it re-surfaces and
+  # advances the surfaced marker, even while the crew is provably working.
+  printf 'done: PR https://example.test/pr/3 (rebased onto main)\n' >> "$status_file"
+  : > "$state/task.turn-ended"
+  : > "$out"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a changed done: line"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the changed done signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the changed done line failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "changed done line was not queued"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "done: PR https://example.test/pr/3 (rebased onto main)" ] \
+    || fail "re-surfaced done line did not advance the surfaced marker"
+  pass "a done: turn-end surfaces once, repeats are absorbed while provably working, and re-surface when not working or changed"
 }
 
 # --- absorbing a blocked turn-end never disarms the busy-turn wedge ---------
@@ -2102,7 +2206,8 @@ test_turn_ended_done_status_surfaced
 test_blocked_turn_end_surfaced_once_then_absorbed
 test_needs_decision_turn_end_dedupe
 test_blocked_reason_change_resurfaces
-test_failed_turn_end_always_surfaces
+test_failed_turn_end_surfaces_once_then_dedupes
+test_done_turn_end_surfaces_once_then_absorbed_while_working
 test_blocked_turn_end_absorb_keeps_wedge_detector_armed
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced

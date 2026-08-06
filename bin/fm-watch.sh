@@ -898,7 +898,11 @@ EOF
     #   A .turn-ended file is judged by turn_end_absorbable: a progress-verb status
     #   log (working:/resolved:) is positive mid-task evidence, so that turn-end is
     #   benign even when the pane is quiet between turns, while a terminal or paused
-    #   status log still surfaces it. A blocked:/needs-decision: line that was
+    #   status log still surfaces it. A terminal line (done:/failed:) surfaces once
+    #   (the .hb-surfaced-<task> marker records it), then a repeat turn-end of the
+    #   SAME line is absorbed while the crew is provably working (a done/failed
+    #   worker steered to keep working) and surfaces again when it is not (a quiet
+    #   done/failed worker may be wedged). A blocked:/needs-decision: line that was
     #   already surfaced (the .hb-surfaced-<task> marker equals it) is also benign:
     #   the worker keeps turning while it waits, so its repeat turn-ends must not
     #   re-wake firstmate with the same line; a new or changed line still surfaces.
