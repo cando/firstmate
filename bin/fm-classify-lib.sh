@@ -668,7 +668,11 @@ surfaced_marker_path() {  # <state> <task>
 # turn-end would otherwise re-surface the SAME line; that exact line is absorbed
 # once it was already surfaced (.hb-surfaced-<task> equals the last status line),
 # while a new or changed line (marker missing or different) still surfaces once.
-# done:/failed: are terminal completions and always surface. A turn-end is a wake
+# done:/failed: are terminal completions: the line surfaces once (marker written),
+# then a repeat turn-end of the SAME line is absorbed while the crew is provably
+# working (a done/failed worker steered to keep working keeps completing turns)
+# and surfaces again when it is not (a quiet done worker may be waiting or
+# wedged, so the wedge detector must keep surfacing it). A turn-end is a wake
 # NOTIFICATION only: the .turn-ended marker's mtime still resets the busy-turn
 # wedge timer regardless of this verdict, so absorbing the wake never disarms the
 # wedge detector.
@@ -678,7 +682,14 @@ turn_end_absorbable() {  # <task> <state>
   [ -n "$last" ] || { crew_is_provably_working "$task"; return; }
   status_is_paused "$last" && return 1
   case "$(status_line_verb "$last")" in
-    done|failed) return 1 ;;
+    done|failed)
+      surfaced=$(cat "$(surfaced_marker_path "$state" "$task")" 2>/dev/null || true)
+      if [ "$surfaced" = "$last" ]; then
+        crew_is_provably_working "$task"
+        return
+      fi
+      return 1
+      ;;
     needs-decision|blocked)
       surfaced=$(cat "$(surfaced_marker_path "$state" "$task")" 2>/dev/null || true)
       [ "$surfaced" = "$last" ]
