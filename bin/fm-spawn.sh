@@ -1883,6 +1883,14 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# A re-spawn must not inherit the previous incarnation's turn-end marker or
+# status log: the watcher reads state/<id>.turn-ended as a fresh completed-turn
+# signal and would wake firstmate before any turn has ended in the new
+# incarnation. The launch itself IS a submitted turn, so the new incarnation's
+# first real turn-end touches the marker afresh. Teardown removes both files
+# together (bin/fm-teardown.sh), so clearing both here is the same fresh-slate
+# contract at the start of an incarnation. rm -f keeps it a no-op on first spawn.
+rm -f -- "$TURNEND" "$STATE_REAL/$ID.status"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
