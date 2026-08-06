@@ -445,6 +445,214 @@ test_turn_ended_done_status_surfaced() {
   pass "a turn-end with a terminal done: status surfaces (queue + exit)"
 }
 
+# --- a blocked: turn-end surfaces once, then repeat turn-ends are absorbed ---
+# A worker that appends blocked: keeps turning while it waits for firstmate, so
+# every turn-end re-surfaces the SAME line. The first surface is the
+# captain-relevant event (queue + marker written); a repeat turn-end whose last
+# status line equals the .hb-surfaced-<task> marker is absorbed, so the session
+# stops flooding with wake-drain churn.
+test_blocked_turn_end_surfaced_once_then_absorbed() {
+  local dir state fakebin out drain_out status_file newsig i pid
+  dir=$(make_case blocked-turn-end-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/task.status"
+  printf 'blocked: no perms\n' > "$status_file"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  # Phase A: the new blocked status + its first turn-end surface once (queue +
+  # exit) and record the exact line in the .hb-surfaced-<task> marker, so the
+  # next identical turn-end can be deduped against it.
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a first blocked: turn-end: $(cat "$out")"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the blocked signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the first blocked turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first blocked turn-end was not queued"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "blocked: no perms" ] \
+    || fail "first blocked surface did not record the exact line in the surfaced marker"
+
+  # Phase B: the worker keeps turning with no new status write; only the
+  # turn-end marker is new. The identical blocked line is already surfaced, so
+  # the wake must be absorbed: watcher stays alive, nothing printed, nothing
+  # queued, and the turn-end marker (the busy-turn wedge age source) survives.
+  : > "$state/task.turn-ended"
+  newsig=$(seen_sig "$state/task.turn-ended")
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" != "$newsig" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "a repeat blocked: turn-end surfaced again instead of being absorbed: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "repeat blocked turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "repeat blocked turn-end enqueued a durable wake record"
+  [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" = "$newsig" ] \
+    || fail "repeat blocked turn-end did not advance its .seen-* suppressor"
+  [ -e "$state/task.turn-ended" ] || fail "absorbing a blocked turn-end removed the turn-end marker"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "blocked: no perms" ] \
+    || fail "absorbed repeat blocked turn-end changed the surfaced marker"
+  reap "$pid"
+  pass "a blocked: turn-end surfaces once (marker written), repeat turn-ends are absorbed"
+}
+
+# --- needs-decision: turn-ends dedupe the same way --------------------------
+# Same contract as blocked:, and the dedupe must be content-based against the
+# marker: the identical line is absorbed while the marker stands, and surfaces
+# again when the marker is missing (an unsurfaced decision must never hide).
+test_needs_decision_turn_end_dedupe() {
+  local dir state fakebin out drain_out status_file newsig i pid
+  dir=$(make_case needs-decision-turn-end-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/task.status"
+  printf 'needs-decision: pick A or B\n' > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
+  printf 'needs-decision: pick A or B\n' > "$state/.hb-surfaced-task"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  # Phase A: already-surfaced needs-decision line, fresh turn-end -> absorbed.
+  newsig=$(seen_sig "$state/task.turn-ended")
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" != "$newsig" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "an already-surfaced needs-decision turn-end surfaced again: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "already-surfaced needs-decision turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "already-surfaced needs-decision turn-end enqueued a durable wake record"
+  [ "$(cat "$state/.seen-task_turn-ended" 2>/dev/null || true)" = "$newsig" ] \
+    || fail "absorbed needs-decision turn-end did not advance its .seen-* suppressor"
+  reap "$pid"
+
+  # Phase B: same line but the marker is gone (never surfaced) -> must surface.
+  rm -f "$state/.hb-surfaced-task"
+  : > "$state/task.turn-ended"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a needs-decision turn-end with no surfaced marker"
+  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the needs-decision turn-end signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the unsurfaced needs-decision turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "unsurfaced needs-decision turn-end was not queued"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "needs-decision: pick A or B" ] \
+    || fail "re-surfaced needs-decision did not record the surfaced marker"
+  pass "needs-decision: turn-ends dedupe against the surfaced marker, and surface again when unsurfaced"
+}
+
+# --- a changed blocked: line re-surfaces -----------------------------------
+# If the blocked reason changes (or a new blocked line is appended), the status
+# file changes, so the wake surfaces again and the marker follows the new line.
+test_blocked_reason_change_resurfaces() {
+  local dir state fakebin out drain_out status_file oldsig pid
+  dir=$(make_case blocked-reason-change); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/task.status"
+  printf 'blocked: no perms\n' > "$status_file"
+  oldsig=$(seen_sig "$status_file")
+  printf 'blocked: no perms (escalated after retry)\n' > "$status_file"
+  printf '%s' "$oldsig" > "$state/.seen-task_status"
+  printf 'blocked: no perms\n' > "$state/.hb-surfaced-task"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a changed blocked: line"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the changed blocked signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the changed blocked line failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "changed blocked line was not queued"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "blocked: no perms (escalated after retry)" ] \
+    || fail "re-surfaced blocked line did not advance the surfaced marker"
+  pass "a changed blocked: line re-surfaces and advances the surfaced marker"
+}
+
+# --- done:/failed: terminal completions always surface ----------------------
+# The dedupe must never suppress terminal completions, even when the exact line
+# was already surfaced once (e.g. a later turn-end after the done: wake).
+test_failed_turn_end_always_surfaces() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case failed-turn-end-always-surfaces); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/task.status"
+  printf 'failed: validation run failed\n' > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
+  printf 'failed: validation run failed\n' > "$state/.hb-surfaced-task"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end with a terminal failed: status"
+  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the failed turn-end signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the failed turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "failed turn-end was not queued"
+  pass "a turn-end with a terminal failed: status always surfaces (queue + exit)"
+}
+
+# --- absorbing a blocked turn-end never disarms the busy-turn wedge ---------
+# The .turn-ended marker is also the busy-turn wedge age source: absorbing the
+# WAKE must leave the marker (and its mtime) intact, so a busy pane whose worker
+# stops completing turns still escalates past BUSY_TURN_MAX_SECS.
+test_blocked_turn_end_absorb_keeps_wedge_detector_armed() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid
+  dir=$(make_case blocked-absorb-wedge-armed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-blocked-wedge"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/blocked-wedge.meta"
+  record_pi_busy "$state" blocked-wedge
+  printf 'blocked: no perms\n' > "$state/blocked-wedge.status"
+  sig=$(seen_sig "$state/blocked-wedge.status"); printf '%s' "$sig" > "$state/.seen-blocked-wedge_status"
+  printf 'blocked: no perms\n' > "$state/.hb-surfaced-blocked-wedge"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch "$state/blocked-wedge.turn-ended"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+
+  # Phase A: the fresh turn-end of the already-surfaced blocked worker is
+  # absorbed; the .turn-ended marker survives untouched (the wedge age source).
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a fresh blocked turn-end on a busy pane was not absorbed: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "absorbed blocked turn-end on a busy pane printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "absorbed blocked turn-end on a busy pane enqueued a durable wake record"
+  [ -s "$state/.seen-blocked-wedge_turn-ended" ] || fail "absorbed busy-pane turn-end did not advance its .seen-* suppressor"
+  [ -e "$state/blocked-wedge.turn-ended" ] || fail "absorbing the turn-end removed the wedge age source"
+  reap "$pid"
+
+  # Phase B: the worker stops completing turns. With the turn-end aged past the
+  # bound and the wedge timer past the threshold, the SAME absorbed-dedupe path
+  # must still let the busy-turn wedge escalate: absorption never disarmed it.
+  set_mtime $(( $(date +%s) - 500 )) "$state/blocked-wedge.turn-ended"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a busy blocked worker with an over-age turn-end did not wedge-escalate: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "busy blocked wedge escalation did not print the stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "busy blocked wedge escalation did not flag a possible wedge"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the busy blocked wedge escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "busy blocked wedge escalation was not queued"
+  pass "absorbing a blocked turn-end leaves the busy-turn wedge detector armed"
+}
+
 test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1891,6 +2099,11 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_progress_status_absorbed_when_pane_quiet
 test_turn_ended_done_status_surfaced
+test_blocked_turn_end_surfaced_once_then_absorbed
+test_needs_decision_turn_end_dedupe
+test_blocked_reason_change_resurfaces
+test_failed_turn_end_always_surfaces
+test_blocked_turn_end_absorb_keeps_wedge_detector_armed
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced

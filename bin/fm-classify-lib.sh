@@ -393,20 +393,38 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# Path of the surfaced-marker for <task>: the exact captain-relevant status line
+# firstmate has already seen, written by mark_surfaced after a wake is enqueued.
+# Single owner of the .hb-surfaced-<task> marker format; fm-push-transition-lib.sh
+# delegates here so push, poll, and turn-end paths write and read one format.
+surfaced_marker_path() {  # <state> <task>
+  printf '%s/.hb-surfaced-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
+}
+
 # 0 (benign/absorb) if a .turn-ended signal for <task> is a benign mid-task turn:
-# the crew's status log has no terminal line (done/failed/blocked/needs-decision)
-# and no declared pause, and either the log itself shows a progress verb
-# (working/resolved) or the authoritative current-state read reports the crew
-# provably working. A turn-end is a wake NOTIFICATION only: the .turn-ended
-# marker's mtime still resets the busy-turn wedge timer regardless of this verdict,
-# so absorbing the wake never disarms the wedge detector.
+# the crew's status log has no terminal line (done/failed) and no declared pause,
+# and either the log itself shows a progress verb (working/resolved), or the
+# authoritative current-state read reports the crew provably working. A blocked:/
+# needs-decision: worker keeps turning while it waits for firstmate, so every
+# turn-end would otherwise re-surface the SAME line; that exact line is absorbed
+# once it was already surfaced (.hb-surfaced-<task> equals the last status line),
+# while a new or changed line (marker missing or different) still surfaces once.
+# done:/failed: are terminal completions and always surface. A turn-end is a wake
+# NOTIFICATION only: the .turn-ended marker's mtime still resets the busy-turn
+# wedge timer regardless of this verdict, so absorbing the wake never disarms the
+# wedge detector.
 turn_end_absorbable() {  # <task> <state>
-  local task=$1 state=$2 last
+  local task=$1 state=$2 last surfaced
   last=$(last_status_line "$state/$task.status")
   [ -n "$last" ] || { crew_is_provably_working "$task"; return; }
   status_is_paused "$last" && return 1
   case "$(status_line_verb "$last")" in
-    done|needs-decision|blocked|failed) return 1 ;;
+    done|failed) return 1 ;;
+    needs-decision|blocked)
+      surfaced=$(cat "$(surfaced_marker_path "$state" "$task")" 2>/dev/null || true)
+      [ "$surfaced" = "$last" ]
+      return
+      ;;
     working|resolved) return 0 ;;
   esac
   crew_is_provably_working "$task"

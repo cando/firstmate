@@ -102,14 +102,24 @@ wake() {
   exit 0
 }
 
+# The .hb-surfaced-<task> marker format is owned by fm-classify-lib.sh's
+# surfaced_marker_path; this wrapper keeps the push/poll paths' caller unchanged.
 _hb_surfaced_path() {
-  printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
+  surfaced_marker_path "$STATE" "$1"
 }
 
 # Record a captain-relevant status after its durable wake has been enqueued.
-mark_surfaced() {  # <status-file>
+# Accepts the task's .status file or its .turn-ended marker; a turn-ended
+# marker resolves to the sibling .status file, so a surface that fired on the
+# turn-end alone (the status was already seen) still records the surfaced line
+# and keeps the blocked/needs-decision turn-end dedupe self-healing.
+mark_surfaced() {  # <status-file | .turn-ended marker>
   local f=$1 task last
-  task=$(basename "$f"); task="${task%.status}"
+  task=$(basename "$f")
+  case "$task" in
+    *.turn-ended) f="${f%.turn-ended}.status" ;;
+  esac
+  task="${task%.status}"; task="${task%.turn-ended}"
   last=$(last_status_line "$f")
   [ -n "$last" ] || return 0
   status_is_captain_relevant "$last" || return 0

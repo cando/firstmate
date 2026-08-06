@@ -17,7 +17,11 @@
 #                          .turn-ended signal whose status log carries a progress
 #                          verb (working:/resolved:) is absorbed even when the
 #                          pane is momentarily quiet between turns, so mid-task
-#                          turn boundaries never wake firstmate.
+#                          turn boundaries never wake firstmate; a blocked:/
+#                          needs-decision: line already surfaced once (the
+#                          .hb-surfaced-<task> marker equals it) is likewise
+#                          absorbed so a waiting worker's every turn-end does not
+#                          re-wake firstmate with the same line.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -894,7 +898,10 @@ EOF
     #   A .turn-ended file is judged by turn_end_absorbable: a progress-verb status
     #   log (working:/resolved:) is positive mid-task evidence, so that turn-end is
     #   benign even when the pane is quiet between turns, while a terminal or paused
-    #   status log still surfaces it.
+    #   status log still surfaces it. A blocked:/needs-decision: line that was
+    #   already surfaced (the .hb-surfaced-<task> marker equals it) is also benign:
+    #   the worker keeps turning while it waits, so its repeat turn-ends must not
+    #   re-wake firstmate with the same line; a new or changed line still surfaces.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew IS provably working) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
