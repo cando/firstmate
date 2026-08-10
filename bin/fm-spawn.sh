@@ -1071,9 +1071,9 @@ launch_template() {
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       if [ "$kind" = secondmate ]; then
-        printf '%s%s' "$harness" ' --tui-mode regular __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s%s' "$harness" ' __TUI_MODE_FLAG____MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s%s' "$harness" ' --tui-mode regular __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s%s' "$harness" ' __TUI_MODE_FLAG____MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -2564,8 +2564,20 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+# pi 0.83+ dropped the --tui-mode startup override (regular TUI is the only
+# interactive mode now); older pi builds still accept it. Probe the installed
+# binary so every pi-family launch passes the flag only where it is supported.
+TUI_MODE_FLAG=''
+case "$HARNESS" in
+  pi|pi-signed)
+    if "$HARNESS" --help 2>&1 | grep -q -- '--tui-mode'; then
+      TUI_MODE_FLAG='--tui-mode regular '
+    fi
+    ;;
+esac
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__TUI_MODE_FLAG__/$TUI_MODE_FLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

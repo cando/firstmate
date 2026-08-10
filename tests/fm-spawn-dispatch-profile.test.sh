@@ -42,7 +42,28 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  fm_fake_exit0 "$fakebin" treehouse
+  # pi and pi-signed answer --help like the real CLIs. FM_FAKE_PI_TUI_MODE
+  # defaults to 1 (older pi builds advertise the --tui-mode startup override
+  # that pi 0.83+ dropped); set it to 0 to simulate the new build so the
+  # probe-adaptive launch can be pinned in both directions.
+  for tool in pi pi-signed; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--help" ]; then
+  if [ "${FM_FAKE_PI_TUI_MODE:-1}" = "1" ]; then
+    printf '  --tui-mode <mode>   Set TUI mode (regular|fullscreen)\n'
+  fi
+  exit 0
+fi
+exit 0
+SH
+    chmod +x "$fakebin/$tool"
+  done
   printf '%s\n' "$fakebin"
 }
 
@@ -543,6 +564,29 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 
+test_pi_drops_tui_mode_when_installed_build_lacks_the_flag() {
+  local rec id out status launch
+  id=profile-pi-notuimode-z8e
+  rec=$(make_spawn_case profile-pi-notuimode pi "$id")
+  read_case_record "$rec"
+
+  # pi 0.83+ removed the --tui-mode startup override (regular TUI is the only
+  # interactive mode); the spawn must probe the installed build and omit the
+  # flag rather than launching a crew with an unknown option.
+  out=$(FM_FAKE_PI_TUI_MODE=0 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "pi spawn on a build without --tui-mode should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi "" ""
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--tui-mode" \
+    "pi launch still passes --tui-mode on a build that dropped the flag"
+  assert_contains "$launch" "FM_PI_HARNESS=pi pi" \
+    "pi launch lost the harness identity on a build without --tui-mode"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "pi launch lost the canonical typed launch-brief envelope on a build without --tui-mode"
+  pass "pi launch adapts to a build that dropped the --tui-mode flag"
+}
+
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
   id=profile-pi-signed-missing-z8c
@@ -693,6 +737,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_pi_drops_tui_mode_when_installed_build_lacks_the_flag
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
