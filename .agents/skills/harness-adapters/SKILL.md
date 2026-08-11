@@ -115,6 +115,12 @@ Choose intermediate levels proportionally as complexity, uncertainty, blast radi
 When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.
 Never select `max` from this fallback; use it only when the captain has explicitly expressed that per-task or standing preference.
 
+### Standing captain preference: max effort (2026-08-11)
+
+This captain has expressed a STANDING preference: spawn crews and scouts with `max` effort (not `high`).
+That standing preference is a concrete captain instruction that outranks the generic fallback, so every crewmate or scout intake in this home resolves to `max` effort unless an explicit per-task captain instruction or dispatch profile says otherwise.
+`max` is passed only where the adapter supports it (claude, pi, pi-signed); adapters whose ceiling is lower (codex, grok, muse) still get their highest supported level, per the row table above.
+
 The supported launch-profile flags below are verified locally; each row records its evidence.
 
 | Harness | Model flag | Effort flag | Notes |
