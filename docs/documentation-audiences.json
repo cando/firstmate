@@ -197,6 +197,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "FIXES.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "README.md",
       "audience": "public-product"
     },
