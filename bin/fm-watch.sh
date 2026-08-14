@@ -380,7 +380,10 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
+# A declared paused: line is the crew's own authoritative statement: TUI harnesses
+# keep the agent alive while idling at the declared wait, so an alive agent is the
+# normal paused shape, never a disconfirmation. Only the captain-held case still
+# requires a confidently dead agent to recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
@@ -395,7 +398,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
+    if [ "$(window_kind "$win")" != secondmate ] && ! status_is_paused "$last"; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
@@ -410,6 +413,11 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  if status_is_paused "$last"; then
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
@@ -1121,9 +1129,11 @@ EOF
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: the crew declared an external wait, or a declared pause or
-          #     captain hold is paired with a confidently dead agent, so absorb on
-          #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - paused: the crew declared an external wait (with TUI harnesses
+          #     the alive idle agent is the normal paused shape, so aliveness
+          #     never disconfirms a declared pause), or a captain hold is
+          #     paired with a confidently dead agent, so absorb on the long
+          #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
           #   - none: no running pipeline, no exact busy verdict, no declared pause.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
