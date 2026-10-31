@@ -793,7 +793,68 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+# The delivery ledger is append-only and every later attach scans it, so a row for
+# a window whose task record is gone has to be pruned or it replays a finished
+# worker's wake forever. The write side owns that half (bin/fm-delivery-lib.sh);
+# this pins it, together with the bounded history that keeps the ledger small.
+# The same write also pins the pid/identity/reason row shape, whose cleaners run
+# sequentially instead of as sibling $() arguments to one printf (a bash 5.2
+# CHLD-trap parse landmine).
+test_delivery_log_prunes_retired_windows_on_write() {
+  local dir state log i rows
+  dir=$(make_case delivery-prune-retired)
+  state="$dir/state"
+  log="$state/.watch-deliveries.log"
+
+  printf 'window=default:w1:p1\n' > "$state/live.meta"
+  {
+    printf '1\tid-one\tstale: default:w1:p1\n'
+    printf '2\tid-retired\tstale: default:w62:p2\n'
+    printf '3\tid-gone\tstale: default:w50:p2 (unread firstmate instruction: fixture)\n'
+  } >> "$log"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1/bin/fm-push-transition-lib.sh"
+    FM_WATCH_DELIVERY_PID=4242
+    FM_WATCH_DELIVERY_IDENTITY="pane id"
+    watch_delivery_publish "signal: delivery log"
+  ' _ "$ROOT" || fail "watch_delivery_publish failed"
+
+  ! grep -qF 'default:w62:p2' "$log" \
+    || fail "a write left a retired window's delivery row in the ledger"
+  ! grep -qF 'default:w50:p2' "$log" \
+    || fail "a write left a retired window's decorated delivery row in the ledger"
+  grep -qF 'stale: default:w1:p1' "$log" \
+    || fail "a write pruned the delivery row of a window this home still records"
+  [ "$(tail -n 1 "$log")" = "$(printf '4242\tpane id\tsignal: delivery log')" ] \
+    || fail "the delivery row lost its pid/identity/reason shape: $(tail -n 1 "$log")"
+
+  # A ledger that somehow grew still converges on the bounded history, so the
+  # replayable set never becomes unbounded.
+  rows=$(wc -l < "$log" | tr -d '[:space:]')
+  i=$rows
+  while [ "$i" -lt 200 ]; do
+    printf '%s\tid-bulk\tsignal: bulk row %s\n' "$i" "$i" >> "$log"
+    i=$((i + 1))
+  done
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1/bin/fm-push-transition-lib.sh"
+    FM_WATCH_DELIVERY_PID=4243
+    FM_WATCH_DELIVERY_IDENTITY="pane id"
+    watch_delivery_publish "signal: bounded"
+  ' _ "$ROOT" || fail "bounded watch_delivery_publish failed"
+  rows=$(wc -l < "$log" | tr -d '[:space:]')
+  [ "$rows" -le 64 ] \
+    || fail "the delivery ledger kept $rows rows past its bounded history"
+  grep -qF 'signal: bounded' "$log" \
+    || fail "the bounded ledger dropped the row it had just written"
+  pass "delivery log: a write drops retired-window rows and keeps bounded history"
+}
+
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_delivery_log_prunes_retired_windows_on_write
 test_self_announced_append_guards
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain

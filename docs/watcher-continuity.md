@@ -65,6 +65,14 @@ Before releasing its singleton lock after printing an actionable reason, the wat
 A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
+`bin/fm-delivery-lib.sh` owns that ledger: its paths, bounds, row format, publish path, and the retired-window rule below.
+A row outlives the window it names, because a task retired moments after its cycle delivered leaves the row behind while teardown removes that task's `state/<id>.meta`.
+A `stale: <window>` row naming a window this home no longer records is therefore retired: the wake it carries is finished work, so the arm never re-reports it, and the next write or read drops the row.
+That arm close reports `watcher: FAILED - cycle's delivered wake named a window this home no longer records (task already retired)` and exits nonzero, which keeps the close typed and loud instead of a silent empty completion.
+Rows for reasons that name no window, such as `signal:`, stay reportable; the ledger also keeps only its newest `FM_WATCH_DELIVERY_KEEP_LINES` rows, so the replayable set cannot grow without bound.
+
+### Cycle exit log
+
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.

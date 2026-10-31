@@ -155,6 +155,80 @@ start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   return 0
 }
 
+# Append a terminal-delivery row for <pid> exactly as the watcher publishes one
+# (bin/fm-delivery-lib.sh). The identity is the record the watcher published in
+# its own lock, so a case pins the arm's read against a real cycle identity
+# rather than a re-derived guess.
+append_delivery_row() {  # <state> <pid> <reason>
+  local state=$1 pid=$2 reason=$3 identity
+  identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  [ -n "$identity" ] || fail "the seed watcher published no lock identity"
+  printf '%s\t%s\t%s\n' "$pid" "$identity" "$reason" >> "$state/.watch-deliveries.log"
+}
+
+# The ledger's whole purpose: a recorded delivery for a window this home still
+# records is reported, so a successor never reports an empty completion.
+test_recorded_delivery_for_a_live_window_is_reported() {
+  local dir state fakebin out armout status
+  dir=$(make_case live-window-delivery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  printf 'window=default:w1:p1\n' > "$state/fixture.meta"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  start_attached_arm "$state" "$fakebin" "$armout" 1
+
+  append_delivery_row "$state" "$SEED_PID" "stale: default:w1:p1"
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  grep -qxF 'stale: default:w1:p1' "$armout" \
+    || fail "the arm did not report a recorded delivery for a live window: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "the arm failed a live window's recorded delivery: $(cat "$armout")"
+  [ "$status" -eq 0 ] && [ "$status" -ne 124 ] \
+    || fail "a live window's recorded delivery did not close the arm successfully (status $status)"
+  grep -q 'reason=attached-delivered-wake' "$state/.watch-cycle-exits.log" \
+    || fail "the live delivery close was not classified in the lifecycle ledger"
+  pass "watch-arm: a recorded delivery for a live window is still reported"
+}
+
+# A task torn down moments after its cycle delivered leaves that row behind. The
+# window's record is gone, so the wake is finished work: reporting it replays a
+# retired worker's stale reason on every later cycle, which is the interruption
+# loop this case pins shut.
+test_recorded_delivery_for_a_retired_window_is_never_replayed() {
+  local dir state fakebin out armout status
+  dir=$(make_case retired-window-delivery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  start_attached_arm "$state" "$fakebin" "$armout" 1
+
+  # The window's task record is already gone, so the row names a retired worker.
+  append_delivery_row "$state" "$SEED_PID" "stale: default:w62:p2"
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  ! grep -qF 'stale: default:w62:p2' "$armout" \
+    || fail "the arm replayed a retired window's recorded wake: $(cat "$armout")"
+  grep -qF 'watcher: FAILED' "$armout" \
+    || fail "a retired window's recorded wake must close loudly, not silently: $(cat "$armout")"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "arm did not exit nonzero for a retired window's recorded wake (status $status)"
+  grep -q 'reason=attached-retired-window-delivered' "$state/.watch-cycle-exits.log" \
+    || fail "the retired-window close was not classified in the lifecycle ledger"
+  # The consumed row is dropped, so it cannot surface on the next attach either.
+  ! grep -qF 'stale: default:w62:p2' "$state/.watch-deliveries.log" \
+    || fail "the retired window's delivery row was left in the ledger to replay"
+  pass "watch-arm: a recorded delivery for a retired window is never replayed"
+}
+
 test_attached_arm_reports_the_delivered_wake() {
   local dir state fakebin out armout status
   dir=$(make_case attached-delivered-wake)
@@ -800,6 +874,8 @@ test_downtime_marker_does_not_follow_symlink() {
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
+test_recorded_delivery_for_a_live_window_is_reported
+test_recorded_delivery_for_a_retired_window_is_never_replayed
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_marker_publish_failure_retains_recovery_evidence
 test_delivery_gap_wake_is_recovered_once

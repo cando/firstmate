@@ -40,9 +40,12 @@
 # that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
 # and exits 0, and only a cycle that delivered nothing is the typed nonzero
-# failure. Neither is ever a clean empty completion. On FAILED it exits non-zero
-# so the failure is loud. A live cycle already present means re-arm attaches - do
-# not start a second watcher.
+# failure. Neither is ever a clean empty completion. A matching record naming a
+# window this home no longer records belongs to a task retired after it
+# delivered; that row is consumed and dropped (bin/fm-delivery-lib.sh), so the
+# finished wake is never re-reported and the close stays typed rather than
+# silent. On FAILED it exits non-zero so the failure is loud. A live cycle already
+# present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -63,6 +66,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-delivery-lib.sh
+. "$SCRIPT_DIR/fm-delivery-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -100,9 +105,6 @@ lock_snapshot() {
   identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   printf 'pid:%s|identity:%s' "$(cycle_clean_field "${pid:-none}")" "$(cycle_clean_field "${identity:-none}")"
 }
-
-WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
-WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 
 cycle_active=0
 cycle_watcher_pid=none
@@ -274,32 +276,63 @@ fail_unexplained_cycle() {
   return 1
 }
 
-# Close a cycle whose reason line this arm could not read against the bounded
-# terminal-delivery ledger the watcher publishes before releasing its lock.
-close_unobserved_cycle() {
-  local i reason clean_identity record_pid record_identity record_reason
+# The cycle delivered a wake naming a window this home no longer records: its
+# task was retired moments after that wake surfaced. The row is consumed rather
+# than re-reported, so this close is still loud and typed instead of a silent
+# empty completion a successor could mistake for a no-op.
+fail_retired_delivery() {
+  echo "watcher: FAILED - cycle's delivered wake named a window this home no longer records (task already retired); the wake was already handled, so it was dropped rather than re-reported"
+  return 1
+}
+
+# Read the reason the current cycle's watcher recorded in the bounded
+# terminal-delivery ledger it publishes before releasing its lock (bin/fm-delivery-lib.sh).
+# Sets DELIVERED_REASON; fails when no record matches the cycle's pid and identity.
+# A record naming a window this home no longer records belongs to a task retired
+# after its cycle delivered: it is consumed rather than reported, and the row is
+# dropped while the lock is held so it can never surface on a later attach.
+DELIVERED_REASON=
+RETIRED_DELIVERY_WINDOW=
+cycle_delivered_reason() {
+  local i clean_identity record_pid record_identity record_reason targets retired=0
+  DELIVERED_REASON=
+  RETIRED_DELIVERY_WINDOW=
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
-    [ "$i" -lt 20 ] || {
-      fail_unexplained_cycle
-      return 1
-    }
+    [ "$i" -lt 20 ] || return 1
     sleep 0.02
     i=$((i + 1))
   done
-  reason=
   if [ -f "$WATCH_DELIVERY_LOG" ]; then
+    targets=$(watch_delivery_recorded_targets "$STATE")
     while IFS=$'\t' read -r record_pid record_identity record_reason; do
       if [ "$record_pid" = "$cycle_watcher_pid" ] && [ "$record_identity" = "$clean_identity" ]; then
-        reason=$record_reason
+        if watch_delivery_reason_retired "$record_reason" "$targets"; then
+          RETIRED_DELIVERY_WINDOW=$(watch_delivery_reason_window "$record_reason")
+          DELIVERED_REASON=
+          retired=1
+        else
+          DELIVERED_REASON=$record_reason
+          RETIRED_DELIVERY_WINDOW=
+        fi
       fi
     done < "$WATCH_DELIVERY_LOG"
   fi
+  [ "$retired" -eq 0 ] || watch_delivery_rewrite_locked "$STATE"
   fm_lock_release "$WATCH_DELIVERY_LOCK"
-  if [ -n "$reason" ]; then
-    printf '%s\n' "$reason"
+  [ -n "$DELIVERED_REASON" ]
+}
+
+# Close a cycle whose reason line this arm could not read against that ledger.
+close_unobserved_cycle() {
+  if cycle_delivered_reason; then
+    printf '%s\n' "$DELIVERED_REASON"
     return 0
+  fi
+  if [ -n "$RETIRED_DELIVERY_WINDOW" ]; then
+    fail_retired_delivery
+    return 1
   fi
   fail_unexplained_cycle
   return 1
@@ -333,7 +366,11 @@ attach_and_wait() {
       cycle_log_append unknown unknown attached-delivered-wake none
       return 0
     fi
-    cycle_log_append unknown unknown attached-cycle-ended none
+    if [ -n "$RETIRED_DELIVERY_WINDOW" ]; then
+      cycle_log_append unknown unknown attached-retired-window-delivered none
+    else
+      cycle_log_append unknown unknown attached-cycle-ended none
+    fi
     return 1
   done
 }
@@ -521,7 +558,11 @@ owned_child_finished() {
       cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
       return 0
     fi
-    cycle_log_append "$rc" "$signal" unexpected-clean-exit none
+    if [ -n "$RETIRED_DELIVERY_WINDOW" ]; then
+      cycle_log_append "$rc" "$signal" retired-window-delivered none
+    else
+      cycle_log_append "$rc" "$signal" unexpected-clean-exit none
+    fi
     return 1
   fi
 

@@ -3,7 +3,8 @@
 #
 # The watcher and event-wait smoke tests source this library instead of loading
 # the whole watcher to obtain handle_push_transition. Its source list is limited
-# to the four production boundaries the transition handler actually calls.
+# to the production boundaries the transition handler actually calls, plus the
+# terminal-delivery ledger it publishes through.
 
 FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -15,6 +16,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
+# shellcheck source=bin/fm-delivery-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-delivery-lib.sh"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -25,53 +28,6 @@ FM_WAKE_POST_OUTPUT_ACTION=
 FM_WATCH_DELIVERED_REASON=
 FM_WATCH_DELIVERY_PID=
 FM_WATCH_DELIVERY_IDENTITY=
-WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
-WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
-WATCH_DELIVERY_MAX_BYTES=${FM_WATCH_DELIVERY_MAX_BYTES:-65536}
-WATCH_DELIVERY_KEEP_LINES=${FM_WATCH_DELIVERY_KEEP_LINES:-64}
-case "$WATCH_DELIVERY_MAX_BYTES" in ''|*[!0-9]*|0) WATCH_DELIVERY_MAX_BYTES=65536 ;; esac
-case "$WATCH_DELIVERY_KEEP_LINES" in ''|*[!0-9]*|0) WATCH_DELIVERY_KEEP_LINES=64 ;; esac
-
-watch_delivery_clean_identity() {
-  printf '%s' "$1" | tr '\t\r\n' '   '
-}
-
-watch_delivery_clean_reason() {
-  printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
-}
-
-watch_delivery_publish() {
-  local reason=$1 i size tmp raw
-  [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0
-  [ -n "$FM_WATCH_DELIVERY_IDENTITY" ] || return 0
-  i=0
-  while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
-    [ "$i" -lt 20 ] || return 0
-    sleep 0.02
-    i=$((i + 1))
-  done
-  printf '%s\t%s\t%s\n' \
-    "$FM_WATCH_DELIVERY_PID" \
-    "$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")" \
-    "$(watch_delivery_clean_reason "$reason")" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
-  size=$(wc -c < "$WATCH_DELIVERY_LOG" 2>/dev/null | tr -d '[:space:]')
-  case "$size" in
-    ''|*[!0-9]*) ;;
-    *)
-      if [ "$size" -ge "$WATCH_DELIVERY_MAX_BYTES" ]; then
-        tmp="$WATCH_DELIVERY_LOG.tmp.$FM_WATCH_DELIVERY_PID"
-        raw="$tmp.raw"
-        tail -n "$WATCH_DELIVERY_KEEP_LINES" "$WATCH_DELIVERY_LOG" 2>/dev/null \
-          | tail -c "$WATCH_DELIVERY_MAX_BYTES" > "$raw" 2>/dev/null \
-          && awk 'NR > 1 || /^[0-9]+\t/' "$raw" > "$tmp" 2>/dev/null \
-          && mv -f "$tmp" "$WATCH_DELIVERY_LOG" 2>/dev/null
-        rm -f "$tmp" "$raw" 2>/dev/null || true
-      fi
-      ;;
-  esac
-  fm_lock_release "$WATCH_DELIVERY_LOCK"
-}
-
 # Append one bounded best-effort line for an absorbed supervision event.
 triage_log() {
   local sz
